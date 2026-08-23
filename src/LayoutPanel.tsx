@@ -72,7 +72,7 @@ export function LayoutPanel({
 }: Props) {
   const [randomCount, setRandomCount] = useState(2)
   const [randomRotate, setRandomRotate] = useState(true)
-  const isRandom = !LAYOUT_TEMPLATES.some((t) => sameLayout(t.layout, engine.layout))
+  const isRandom = engine.arrangement.kind === 'random'
 
   return (
     <div className="absolute top-20 right-3 flex w-40 flex-col gap-3 rounded-xl bg-white/95 p-3 shadow-lg backdrop-blur">
@@ -85,7 +85,8 @@ export function LayoutPanel({
               title={t.label}
               onClick={() => onSelectLayout(t.layout)}
               className={`flex h-11 items-center justify-center rounded-lg border ${
-                !isRandom && sameLayout(t.layout, engine.layout)
+                engine.arrangement.kind === 'layout' &&
+                sameLayout(t.layout, engine.arrangement.layout)
                   ? 'border-sky-400 bg-sky-50'
                   : 'border-gray-200 hover:bg-gray-50'
               }`}

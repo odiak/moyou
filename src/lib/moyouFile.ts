@@ -1,14 +1,18 @@
-// Save / load of Moyou pattern files: the super cell (the arrangement of
-// cell variants that actually repeats) as a PNG with pattern metadata in a
-// tEXt chunk. If the metadata is stripped (e.g. by an image host), the
-// image still loads as a plain single cell and only the pattern structure
-// is lost.
+// Save / load of Moyou pattern files: a PNG of the repeating unit (or, for
+// random arrangements, a sample block that contains every variant) with
+// pattern metadata in a tEXt chunk. If the metadata is stripped (e.g. by an
+// image host), the image still works as a plain seamless tile — a random
+// pattern degrades to the periodic repetition of its sample block.
 
 import {
+  Arrangement,
   Layout,
+  layoutArrangement,
   layoutRotation,
   layoutVariantCount,
   PatternParams,
+  randomCellAt,
+  RandomArrangement,
   rotSource,
   SINGLE_LAYOUT
 } from './engine'
@@ -16,25 +20,10 @@ import { encodePng, readTextChunks } from './png'
 
 export const METADATA_KEYWORD = 'moyou'
 
-export type MoyouMetadata = {
-  // 2 = variant grid, 3 = adds per-position rotations
-  version: 2 | 3
-  // Per-cell size; the image itself is (cols * w) × (rows * h)
-  w: number
-  h: number
-  shift: number
-  flipX: boolean
-  flipY: boolean
-  cols: number
-  rows: number
-  map: number[]
-  rot?: number[]
-}
-
 export type LoadedPattern = {
   cellWidth: number
   cellHeight: number
-  layout: Layout
+  arrangement: Arrangement
   // variantCount * cellWidth * cellHeight * 4 bytes
   data: Uint8ClampedArray
   params: PatternParams | undefined
@@ -43,7 +32,13 @@ export type LoadedPattern = {
 export const MAX_CELL_SIZE = 1024
 export const MAX_IMAGE_SIZE = 4096
 
-export async function encodePatternPng(
+function paramsMeta(params: PatternParams) {
+  return { shift: params.shift, flipX: params.flipX, flipY: params.flipY }
+}
+
+// Versions: 1 = single cell, 2 = variant grid, 3 = grid with rotations,
+// 4 = random arrangement (image is a sample block, seed is the recipe)
+export async function encodeLayoutPng(
   superData: Uint8ClampedArray,
   cellWidth: number,
   cellHeight: number,
@@ -51,13 +46,11 @@ export async function encodePatternPng(
   params: PatternParams
 ): Promise<Uint8Array> {
   const hasRot = layout.rot !== undefined && layout.rot.some((r) => (r & 3) !== 0)
-  const meta: MoyouMetadata = {
+  const meta = {
     version: hasRot ? 3 : 2,
     w: cellWidth,
     h: cellHeight,
-    shift: params.shift,
-    flipX: params.flipX,
-    flipY: params.flipY,
+    ...paramsMeta(params),
     cols: layout.cols,
     rows: layout.rows,
     map: layout.map,
@@ -68,10 +61,38 @@ export async function encodePatternPng(
   })
 }
 
+export async function encodeRandomPng(
+  blockData: Uint8ClampedArray,
+  blockSize: number,
+  cellWidth: number,
+  cellHeight: number,
+  arr: RandomArrangement,
+  params: PatternParams
+): Promise<Uint8Array> {
+  const meta = {
+    version: 4,
+    w: cellWidth,
+    h: cellHeight,
+    ...paramsMeta(params),
+    block: blockSize,
+    seed: arr.seed,
+    count: arr.count,
+    rotate: arr.rotate
+  }
+  return encodePng(blockData, blockSize * cellWidth, blockSize * cellHeight, {
+    [METADATA_KEYWORD]: JSON.stringify(meta)
+  })
+}
+
 type ParsedMetadata = {
   w: number
   h: number
-  layout: Layout
+  arrangement: Arrangement
+  // Grid dimensions of the stored image, and the variant/rotation at each
+  // grid position (how to slice the image back into variant buffers)
+  gridCols: number
+  gridRows: number
+  cellAt: (gx: number, gy: number) => { v: number; rot: number }
   params: PatternParams
 }
 
@@ -102,18 +123,61 @@ function parseMetadata(text: string | undefined): ParsedMetadata | undefined {
       flipX: m.flipX === true,
       flipY: m.flipY === true
     }
+    const base = { w: m.w, h: m.h, params }
     if (m.version === 1) {
-      return { w: m.w, h: m.h, layout: SINGLE_LAYOUT, params }
+      return {
+        ...base,
+        arrangement: layoutArrangement(SINGLE_LAYOUT),
+        gridCols: 1,
+        gridRows: 1,
+        cellAt: () => ({ v: 0, rot: 0 })
+      }
     }
     if ((m.version === 2 || m.version === 3) && isValidLayout(m.cols, m.rows, m.map)) {
       const layout: Layout = { cols: m.cols as number, rows: m.rows as number, map: m.map }
       if (isValidRot(m.rot, layout.map.length)) layout.rot = m.rot
-      return { w: m.w, h: m.h, layout, params }
+      return {
+        ...base,
+        arrangement: layoutArrangement(layout),
+        gridCols: layout.cols,
+        gridRows: layout.rows,
+        cellAt: (gx, gy) => {
+          const g = gy * layout.cols + gx
+          return { v: layout.map[g], rot: layoutRotation(layout, g) }
+        }
+      }
+    }
+    if (m.version === 4) {
+      const { block, seed, count } = m
+      if (typeof block !== 'number' || !Number.isInteger(block) || block < 1 || block > 8) {
+        return undefined
+      }
+      if (typeof seed !== 'number' || !Number.isInteger(seed)) return undefined
+      if (typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > 16) {
+        return undefined
+      }
+      const arr: RandomArrangement = {
+        kind: 'random',
+        seed: seed >>> 0,
+        count,
+        rotate: m.rotate === true
+      }
+      return {
+        ...base,
+        arrangement: arr,
+        gridCols: block,
+        gridRows: block,
+        cellAt: (gx, gy) => randomCellAt(arr, gx, gy)
+      }
     }
     return undefined
   } catch {
     return undefined
   }
+}
+
+function arrangementVariantCount(arrangement: Arrangement): number {
+  return arrangement.kind === 'layout' ? layoutVariantCount(arrangement.layout) : arrangement.count
 }
 
 // Decodes any browser-supported image file. PNG metadata is parsed from the
@@ -141,8 +205,8 @@ export async function decodePatternFile(file: Blob): Promise<LoadedPattern> {
     meta !== undefined &&
     meta.w <= MAX_CELL_SIZE &&
     meta.h <= MAX_CELL_SIZE &&
-    meta.layout.cols * meta.w === width &&
-    meta.layout.rows * meta.h === height
+    meta.gridCols * meta.w === width &&
+    meta.gridRows * meta.h === height
 
   if (!structureValid) {
     if (width > MAX_CELL_SIZE || height > MAX_CELL_SIZE) {
@@ -151,32 +215,32 @@ export async function decodePatternFile(file: Blob): Promise<LoadedPattern> {
     return {
       cellWidth: width,
       cellHeight: height,
-      layout: SINGLE_LAYOUT,
+      arrangement: layoutArrangement(SINGLE_LAYOUT),
       data: new Uint8ClampedArray(image.data),
       params: undefined
     }
   }
 
-  // Slice the super cell image back into variant buffers (undoing each
+  // Slice the stored image back into variant buffers (undoing each
   // position's rotation). Duplicate grid positions of the same variant just
   // overwrite each other (they are identical in files we wrote ourselves).
-  const { w, h, layout } = meta
-  const data = new Uint8ClampedArray(layoutVariantCount(layout) * w * h * 4)
+  const { w, h } = meta
+  const data = new Uint8ClampedArray(arrangementVariantCount(meta.arrangement) * w * h * 4)
   const dataWords = new Uint32Array(data.buffer)
   const imageWords = new Uint32Array(image.data.buffer, image.data.byteOffset, width * height)
-  for (let j = 0; j < layout.map.length; j++) {
-    const gx = j % layout.cols
-    const gy = (j / layout.cols) | 0
-    const base = layout.map[j] * w * h
-    const rot = layoutRotation(layout, j)
-    for (let dy = 0; dy < h; dy++) {
-      const row = (gy * h + dy) * width + gx * w
-      for (let dx = 0; dx < w; dx++) {
-        dataWords[base + rotSource(dx, dy, w, rot)] = imageWords[row + dx]
+  for (let gy = 0; gy < meta.gridRows; gy++) {
+    for (let gx = 0; gx < meta.gridCols; gx++) {
+      const { v, rot } = meta.cellAt(gx, gy)
+      const base = v * w * h
+      for (let dy = 0; dy < h; dy++) {
+        const row = (gy * h + dy) * width + gx * w
+        for (let dx = 0; dx < w; dx++) {
+          dataWords[base + rotSource(dx, dy, w, rot)] = imageWords[row + dx]
+        }
       }
     }
   }
-  return { cellWidth: w, cellHeight: h, layout, data, params: meta.params }
+  return { cellWidth: w, cellHeight: h, arrangement: meta.arrangement, data, params: meta.params }
 }
 
 export function downloadBytes(bytes: Uint8Array, filename: string): void {

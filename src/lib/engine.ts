@@ -46,6 +46,64 @@ export function sameLayout(a: Layout, b: Layout): boolean {
   )
 }
 
+// How variants are placed on the plane: either a repeating layout grid, or
+// a non-periodic random assignment where the cell at grid coordinate (i, k)
+// is a pure function of (seed, i, k) — reproducible from the seed alone.
+export type LayoutArrangement = { kind: 'layout'; layout: Layout }
+export type RandomArrangement = { kind: 'random'; seed: number; count: number; rotate: boolean }
+export type Arrangement = LayoutArrangement | RandomArrangement
+
+export function layoutArrangement(layout: Layout): Arrangement {
+  return { kind: 'layout', layout }
+}
+
+export function sameArrangement(a: Arrangement, b: Arrangement): boolean {
+  if (a.kind === 'layout' && b.kind === 'layout') return sameLayout(a.layout, b.layout)
+  if (a.kind === 'random' && b.kind === 'random') {
+    return a.seed === b.seed && a.count === b.count && a.rotate === b.rotate
+  }
+  return false
+}
+
+// 32-bit avalanche hash of (seed, x, y). A plain additive seed (s + x + C*y)
+// would collide along a diagonal and create a hidden period; full mixing
+// makes neighboring cells independent.
+export function hash2d(seed: number, x: number, y: number): number {
+  let h = (seed ^ 0x9e3779b9) >>> 0
+  h = Math.imul(h ^ (x | 0), 0x85ebca6b) >>> 0
+  h = (h ^ (h >>> 13)) >>> 0
+  h = Math.imul(h ^ (y | 0), 0xc2b2ae35) >>> 0
+  h = (h ^ (h >>> 16)) >>> 0
+  h = Math.imul(h, 0x27d4eb2f) >>> 0
+  return (h ^ (h >>> 15)) >>> 0
+}
+
+// The variant and rotation shown at cell (i, k) of a random arrangement
+export function randomCellAt(
+  arr: RandomArrangement,
+  i: number,
+  k: number
+): { v: number; rot: number } {
+  const h = hash2d(arr.seed, i, k)
+  return { v: h % arr.count, rot: arr.rotate ? (h >>> 10) & 3 : 0 }
+}
+
+// Smallest n (up to max) such that the n×n block of cells starting at the
+// origin contains every variant, or undefined if none does. Used to pick an
+// exportable sample block (and to reject seeds that have none).
+export function randomBlockSize(arr: RandomArrangement, max = 8): number | undefined {
+  const seen = new Set<number>()
+  for (let n = 1; n <= max; n++) {
+    // Cells added by growing the block from (n-1)² to n²
+    for (let i = 0; i < n; i++) {
+      seen.add(randomCellAt(arr, i, n - 1).v)
+      seen.add(randomCellAt(arr, n - 1, i).v)
+    }
+    if (seen.size >= arr.count && n * n >= arr.count) return n
+  }
+  return undefined
+}
+
 // Flat pixel index (sy * n + sx) of the source pixel that is shown at
 // (dx, dy) when a square n×n cell is drawn rotated by rot quarter turns
 // clockwise.
@@ -135,7 +193,7 @@ function mod(a: number, b: number): number {
 export class PatternEngine {
   readonly width: number // per-cell size
   readonly height: number
-  readonly layout: Layout
+  readonly arrangement: Arrangement
   readonly variantCount: number
   // All variants in one buffer, stacked vertically: variant v occupies
   // bytes [v * width * height * 4, (v + 1) * width * height * 4)
@@ -146,11 +204,12 @@ export class PatternEngine {
   // re-upload the cells to their canvases
   revision = 0
 
-  constructor(width: number, height: number, layout: Layout, data?: Uint8ClampedArray) {
+  constructor(width: number, height: number, arrangement: Arrangement, data?: Uint8ClampedArray) {
     this.width = width
     this.height = height
-    this.layout = layout
-    this.variantCount = layoutVariantCount(layout)
+    this.arrangement = arrangement
+    this.variantCount =
+      arrangement.kind === 'layout' ? layoutVariantCount(arrangement.layout) : arrangement.count
     const length = this.variantCount * width * height * 4
     if (data !== undefined) {
       if (data.length !== length) throw new Error('PatternEngine: invalid data length')
@@ -161,12 +220,18 @@ export class PatternEngine {
     this.words = new Uint32Array(this.data.buffer, this.data.byteOffset, length / 4)
   }
 
+  // The repeating unit; for random arrangements nothing repeats, so shift,
+  // flips, view fitting etc. operate on single cells
   get superWidth(): number {
-    return this.layout.cols * this.width
+    return this.arrangement.kind === 'layout'
+      ? this.arrangement.layout.cols * this.width
+      : this.width
   }
 
   get superHeight(): number {
-    return this.layout.rows * this.height
+    return this.arrangement.kind === 'layout'
+      ? this.arrangement.layout.rows * this.height
+      : this.height
   }
 
   // The pixel data of one variant (a view into the shared buffer)
@@ -177,11 +242,13 @@ export class PatternEngine {
 
   // World coordinates → flat pixel index (variant * w * h + pixel).
   // Torus wrap of the super cell with shift and alternating mirror, then
-  // the layout grid picks the variant and its rotation.
+  // the arrangement picks the variant and its rotation. For random
+  // arrangements the (i, k) cell coordinate itself selects them via the
+  // seed hash, so nothing ever repeats.
   mapPoint(wx: number, wy: number): number {
-    const { width: w, height: h, layout } = this
-    const W = layout.cols * w
-    const H = layout.rows * h
+    const { width: w, height: h, arrangement } = this
+    const W = this.superWidth
+    const H = this.superHeight
     const { shift, flipX, flipY } = this.params
     const k = floorDiv(wy, H)
     let yy = wy - k * H
@@ -190,6 +257,11 @@ export class PatternEngine {
     let xx = xs - i * W
     if (flipX && mod(i, 2) === 1) xx = W - 1 - xx
     if (flipY && mod(k, 2) === 1) yy = H - 1 - yy
+    if (arrangement.kind === 'random') {
+      const { v, rot } = randomCellAt(arrangement, i, k)
+      return v * w * h + rotSource(xx, yy, w, rot)
+    }
+    const layout = arrangement.layout
     const gx = (xx / w) | 0
     const gy = (yy / h) | 0
     const g = gy * layout.cols + gx
@@ -286,7 +358,9 @@ export class PatternEngine {
   // Composes the full super cell (what actually repeats) as RGBA pixels;
   // used for PNG export.
   composeSuperData(): Uint8ClampedArray {
-    const { width: w, height: h, layout } = this
+    if (this.arrangement.kind !== 'layout') throw new Error('composeSuperData: not a layout')
+    const { width: w, height: h } = this
+    const layout = this.arrangement.layout
     const W = this.superWidth
     const out = new Uint8ClampedArray(W * this.superHeight * 4)
     const outWords = new Uint32Array(out.buffer)
@@ -303,6 +377,32 @@ export class PatternEngine {
       }
     }
     return out
+  }
+
+  // Composes the n×n sample block of a random arrangement starting at cell
+  // (0, 0), exactly as displayed there (rotations applied). Together with
+  // the seed this makes the export both a usable tile and a full recipe.
+  composeRandomBlock(): { size: number; data: Uint8ClampedArray } {
+    if (this.arrangement.kind !== 'random') throw new Error('composeRandomBlock: not random')
+    const size = randomBlockSize(this.arrangement)
+    if (size === undefined) throw new Error('composeRandomBlock: block misses variants')
+    const { width: w, height: h } = this
+    const W = size * w
+    const out = new Uint8ClampedArray(W * size * h * 4)
+    const outWords = new Uint32Array(out.buffer)
+    for (let gy = 0; gy < size; gy++) {
+      for (let gx = 0; gx < size; gx++) {
+        const { v, rot } = randomCellAt(this.arrangement, gx, gy)
+        const base = v * w * h
+        for (let dy = 0; dy < h; dy++) {
+          const row = (gy * h + dy) * W + gx * w
+          for (let dx = 0; dx < w; dx++) {
+            outWords[row + dx] = this.words[base + rotSource(dx, dy, w, rot)]
+          }
+        }
+      }
+    }
+    return { size, data: out }
   }
 
   snapshot(): Uint8ClampedArray {

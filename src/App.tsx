@@ -18,22 +18,25 @@ import {
   ZoomOut
 } from 'lucide-react'
 import {
-  Layout,
+  Arrangement,
+  layoutArrangement,
   MAX_BRUSH_SIZE,
   packColor,
   PatternEngine,
-  sameLayout,
+  randomBlockSize,
+  RandomArrangement,
+  sameArrangement,
   SINGLE_LAYOUT
 } from './lib/engine'
-import { decodePatternFile, downloadBytes, encodePatternPng } from './lib/moyouFile'
+import { decodePatternFile, downloadBytes, encodeLayoutPng, encodeRandomPng } from './lib/moyouFile'
 import { LayoutPanel } from './LayoutPanel'
 import { CanvasApi, PatternCanvas, Tool } from './PatternCanvas'
 
 const CELL_SIZES = [128, 256, 512]
 const MAX_UNDO = 50
 
-function createEngine(size: number, layout: Layout = SINGLE_LAYOUT): PatternEngine {
-  const engine = new PatternEngine(size, size, layout)
+function createEngine(size: number): PatternEngine {
+  const engine = new PatternEngine(size, size, layoutArrangement(SINGLE_LAYOUT))
   engine.fillAll(packColor(0xffffff))
   return engine
 }
@@ -125,10 +128,10 @@ export function App() {
   // Switches the variant arrangement. Variants keep their identity (cell A
   // stays cell A, new ones start as copies), so reshuffling a random
   // arrangement never scrambles which drawing belongs to which cell.
-  const changeLayout = useCallback(
-    (layout: Layout) => {
-      if (sameLayout(layout, engine.layout)) return
-      const next = new PatternEngine(engine.width, engine.height, layout)
+  const changeArrangement = useCallback(
+    (arrangement: Arrangement) => {
+      if (sameArrangement(arrangement, engine.arrangement)) return
+      const next = new PatternEngine(engine.width, engine.height, arrangement)
       for (let v = 0; v < next.variantCount; v++) {
         next.cellData(v).set(engine.cellData(v % engine.variantCount))
       }
@@ -144,34 +147,49 @@ export function App() {
     [engine]
   )
 
-  // Random arrangement: an n×n block of random variants (and optionally
-  // random quarter-turn rotations) that repeats as one big super cell.
-  const generateRandomLayout = useCallback(
+  // Non-periodic random arrangement: each cell is a pure function of
+  // (seed, i, k), so the whole infinite pattern is reproducible from the
+  // seed. Seeds whose origin block misses a variant are rejected so the
+  // export (sample block + seed) always round-trips.
+  const generateRandom = useCallback(
     (count: number, withRotation: boolean) => {
-      // Keep the exported super cell PNG within reasonable bounds
-      const size = engine.width >= 512 ? 4 : 8
-      const n = size * size
-      let map: number[]
-      do {
-        map = Array.from({ length: n }, () => Math.floor(Math.random() * count))
-      } while (new Set(map).size < count)
-      const layout: Layout = { cols: size, rows: size, map }
-      if (withRotation) {
-        layout.rot = Array.from({ length: n }, () => Math.floor(Math.random() * 4))
+      for (;;) {
+        const arr: RandomArrangement = {
+          kind: 'random',
+          seed: (Math.random() * 0x100000000) >>> 0,
+          count,
+          rotate: withRotation
+        }
+        if (randomBlockSize(arr) !== undefined) {
+          changeArrangement(arr)
+          return
+        }
       }
-      changeLayout(layout)
     },
-    [engine, changeLayout]
+    [changeArrangement]
   )
 
   const savePattern = useCallback(async () => {
-    const bytes = await encodePatternPng(
-      engine.composeSuperData(),
-      engine.width,
-      engine.height,
-      engine.layout,
-      engine.params
-    )
+    let bytes: Uint8Array
+    if (engine.arrangement.kind === 'random') {
+      const block = engine.composeRandomBlock()
+      bytes = await encodeRandomPng(
+        block.data,
+        block.size,
+        engine.width,
+        engine.height,
+        engine.arrangement,
+        engine.params
+      )
+    } else {
+      bytes = await encodeLayoutPng(
+        engine.composeSuperData(),
+        engine.width,
+        engine.height,
+        engine.arrangement.layout,
+        engine.params
+      )
+    }
     downloadBytes(bytes, `moyou-${timestamp()}.png`)
   }, [engine])
 
@@ -182,7 +200,7 @@ export function App() {
         const next = new PatternEngine(
           loaded.cellWidth,
           loaded.cellHeight,
-          loaded.layout,
+          loaded.arrangement,
           loaded.data
         )
         replaceEngine(next, loaded.params)
@@ -383,8 +401,8 @@ export function App() {
       <LayoutPanel
         engine={engine}
         highlightVariant={highlightVariant}
-        onSelectLayout={changeLayout}
-        onGenerateRandom={generateRandomLayout}
+        onSelectLayout={(layout) => changeArrangement(layoutArrangement(layout))}
+        onGenerateRandom={generateRandom}
         onSetHighlight={setHighlightVariant}
       />
 

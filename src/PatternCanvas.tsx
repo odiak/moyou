@@ -1,5 +1,12 @@
 import { useEffect, useRef } from 'react'
-import { layoutRotation, packColor, PatternEngine, TRANSPARENT, unpackColor } from './lib/engine'
+import {
+  layoutRotation,
+  packColor,
+  PatternEngine,
+  randomCellAt,
+  TRANSPARENT,
+  unpackColor
+} from './lib/engine'
 
 export type Tool = 'pen' | 'eraser' | 'fill' | 'eyedropper' | 'pan'
 
@@ -131,8 +138,9 @@ export function PatternCanvas(props: Props) {
     const render = () => {
       const { engine, showGuides, highlightVariant } = propsRef.current
       const view = viewRef.current
-      const { width: w, height: h } = engine
-      const { cols, rows, map } = engine.layout
+      const { width: w, height: h, arrangement } = engine
+      const layout = arrangement.kind === 'layout' ? arrangement.layout : null
+      const randomArr = arrangement.kind === 'random' ? arrangement : null
       const W = engine.superWidth
       const H = engine.superHeight
       const { shift, flipX, flipY } = engine.params
@@ -159,20 +167,22 @@ export function PatternCanvas(props: Props) {
         for (let v = 0; v < engine.variantCount; v++) {
           variantCanvases[v].getContext('2d')!.putImageData(variantImages[v], 0, 0)
         }
-        superCtx.setTransform(1, 0, 0, 1, 0, 0)
-        superCtx.clearRect(0, 0, W, H)
-        for (let j = 0; j < map.length; j++) {
-          const gx = j % cols
-          const gy = (j / cols) | 0
-          const rot = layoutRotation(engine.layout, j)
-          if (rot === 0) {
-            superCtx.drawImage(variantCanvases[map[j]], gx * w, gy * h)
-          } else {
-            superCtx.save()
-            superCtx.translate(gx * w + w / 2, gy * h + h / 2)
-            superCtx.rotate((rot * Math.PI) / 2)
-            superCtx.drawImage(variantCanvases[map[j]], -w / 2, -h / 2)
-            superCtx.restore()
+        if (layout !== null) {
+          superCtx.setTransform(1, 0, 0, 1, 0, 0)
+          superCtx.clearRect(0, 0, W, H)
+          for (let j = 0; j < layout.map.length; j++) {
+            const gx = j % layout.cols
+            const gy = (j / layout.cols) | 0
+            const rot = layoutRotation(layout, j)
+            if (rot === 0) {
+              superCtx.drawImage(variantCanvases[layout.map[j]], gx * w, gy * h)
+            } else {
+              superCtx.save()
+              superCtx.translate(gx * w + w / 2, gy * h + h / 2)
+              superCtx.rotate((rot * Math.PI) / 2)
+              superCtx.drawImage(variantCanvases[layout.map[j]], -w / 2, -h / 2)
+              superCtx.restore()
+            }
           }
         }
         uploadedRevision = engine.revision
@@ -199,16 +209,38 @@ export function PatternCanvas(props: Props) {
           const sx0 = Math.round((x0 - view.x) * s)
           const sx1 = Math.round((x0 + W - view.x) * s)
           const fx = flipX && mod(i, 2) === 1
+          const dw = sx1 - sx0
+          const dh = sy1 - sy0
+          if (randomArr !== null) {
+            // Random arrangement: each cell is drawn individually with its
+            // hash-chosen variant and rotation
+            const { v, rot } = randomCellAt(randomArr, i, k)
+            if (!fx && !fy && rot === 0) {
+              ctx.drawImage(variantCanvases[v], sx0, sy0, dw, dh)
+            } else {
+              ctx.save()
+              ctx.translate(sx0 + dw / 2, sy0 + dh / 2)
+              ctx.scale(fx ? -1 : 1, fy ? -1 : 1)
+              ctx.rotate((rot * Math.PI) / 2)
+              ctx.drawImage(variantCanvases[v], -dw / 2, -dh / 2, dw, dh)
+              ctx.restore()
+            }
+            if (highlightVariant === v) {
+              highlightRects.push((x0 - view.x) * s, (k * H - view.y) * s)
+            }
+            continue
+          }
           if (!fx && !fy) {
-            ctx.drawImage(superCanvas, sx0, sy0, sx1 - sx0, sy1 - sy0)
+            ctx.drawImage(superCanvas, sx0, sy0, dw, dh)
           } else {
             ctx.save()
             ctx.translate(fx ? sx1 : sx0, fy ? sy1 : sy0)
             ctx.scale(fx ? -1 : 1, fy ? -1 : 1)
-            ctx.drawImage(superCanvas, 0, 0, sx1 - sx0, sy1 - sy0)
+            ctx.drawImage(superCanvas, 0, 0, dw, dh)
             ctx.restore()
           }
-          if (highlightVariant !== null) {
+          if (highlightVariant !== null && layout !== null) {
+            const { cols, rows, map } = layout
             for (let j = 0; j < map.length; j++) {
               if (map[j] !== highlightVariant) continue
               const gx = j % cols
@@ -247,7 +279,8 @@ export function PatternCanvas(props: Props) {
         ctx.stroke()
 
         // Inner cell boundaries (lighter)
-        if (cols > 1 || rows > 1) {
+        if (layout !== null && (layout.cols > 1 || layout.rows > 1)) {
+          const { cols, rows } = layout
           ctx.strokeStyle = 'rgba(0, 0, 0, 0.1)'
           ctx.beginPath()
           for (let k = k0; k <= k1; k++) {
