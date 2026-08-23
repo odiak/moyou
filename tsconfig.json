@@ -1,19 +1,17 @@
 {
   "compilerOptions": {
-    "target": "ESNext",
-    "lib": ["DOM", "DOM.Iterable", "ESNext"],
-    "allowJs": false,
-    "skipLibCheck": false,
-    "esModuleInterop": false,
-    "allowSyntheticDefaultImports": true,
-    "strict": true,
-    "forceConsistentCasingInFileNames": true,
+    "target": "ES2022",
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "module": "ESNext",
-    "moduleResolution": "Node",
-    "resolveJsonModule": true,
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "skipLibCheck": true,
     "isolatedModules": true,
     "noEmit": true,
-    "jsx": "react"
+    "forceConsistentCasingInFileNames": true,
+    "useDefineForClassFields": true
   },
-  "include": ["./src"]
+  "include": ["src"]
 }
