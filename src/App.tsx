@@ -56,6 +56,7 @@ export function App() {
   const [flipX, setFlipX] = useState(false)
   const [flipY, setFlipY] = useState(false)
   const [showGuides, setShowGuides] = useState(true)
+  const [gridDivisions, setGridDivisions] = useState(0)
   const [highlightVariant, setHighlightVariant] = useState<number | null>(null)
   const [newDialogOpen, setNewDialogOpen] = useState(false)
   const [, setHistoryVersion] = useState(0)
@@ -310,6 +311,7 @@ export function App() {
         color={color}
         brushSize={brushSize}
         showGuides={showGuides}
+        gridDivisions={gridDivisions}
         highlightVariant={highlightVariant}
         onPickColor={(c) => {
           setColor(c)
@@ -457,6 +459,23 @@ export function App() {
           <Grid3x3 size={18} />,
           'セル境界のガイド'
         )}
+        <label className="flex items-center gap-1.5 text-sm text-gray-600">
+          <span>グリッド</span>
+          {[2, 4, 8].map((n) => (
+            <button
+              key={n}
+              title={`セルを${n}分割するグリッド（もう一度クリックで非表示）`}
+              onClick={() => setGridDivisions(gridDivisions === n ? 0 : n)}
+              className={`h-7 w-7 rounded-md border text-xs tabular-nums ${
+                gridDivisions === n
+                  ? 'border-sky-400 bg-sky-50 text-sky-700'
+                  : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              {n}
+            </button>
+          ))}
+        </label>
         <div className="flex-1" />
         <span className="hidden text-xs text-gray-400 sm:inline">
           セル {engine.width}×{engine.height}px

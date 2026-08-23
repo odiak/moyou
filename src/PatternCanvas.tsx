@@ -21,6 +21,8 @@ type Props = {
   color: string
   brushSize: number
   showGuides: boolean
+  // In-cell alignment grid: number of subdivisions per cell (0 = off)
+  gridDivisions: number
   // Cells of this variant get an accent outline (visual aid only)
   highlightVariant: number | null
   onPickColor: (hex: string) => void
@@ -254,6 +256,48 @@ export function PatternCanvas(props: Props) {
         }
       }
 
+      // In-cell alignment grid: subdivides every cell into gridDivisions
+      // parts so edge ports can be drawn at consistent positions across
+      // variants. Cell midlines are slightly stronger (edge midpoints are
+      // the natural connection points). Hidden when too dense on screen,
+      // and follows the cell-boundary guides toggle.
+      const grid = propsRef.current.gridDivisions
+      if (showGuides && grid > 0 && (w / grid) * s >= 8) {
+        const stepX = w / grid
+        const stepY = h / grid
+        const nx = (W / w) * grid
+        const ny = (H / h) * grid
+        for (const midPass of [false, true]) {
+          ctx.strokeStyle = midPass ? 'rgba(0, 0, 0, 0.16)' : 'rgba(0, 0, 0, 0.07)'
+          ctx.lineWidth = 1
+          ctx.beginPath()
+          for (let k = k0; k <= k1; k++) {
+            const rowShift = k * shift
+            const yTop = Math.max(0, (k * H - view.y) * s)
+            const yBottom = Math.min(cssH, ((k + 1) * H - view.y) * s)
+            const i0 = Math.floor((view.x - rowShift) / W)
+            const i1 = Math.floor((view.x + cssW / s - rowShift) / W)
+            for (let m = 1; m < ny; m++) {
+              if (m % grid === 0) continue // cell boundary, drawn by guides
+              if ((m % grid === grid / 2) !== midPass) continue
+              const y = (k * H + m * stepY - view.y) * s
+              ctx.moveTo(0, y)
+              ctx.lineTo(cssW, y)
+            }
+            for (let i = i0; i <= i1; i++) {
+              for (let m = 1; m < nx; m++) {
+                if (m % grid === 0) continue
+                if ((m % grid === grid / 2) !== midPass) continue
+                const x = (i * W + rowShift + m * stepX - view.x) * s
+                ctx.moveTo(x, yTop)
+                ctx.lineTo(x, yBottom)
+              }
+            }
+          }
+          ctx.stroke()
+        }
+      }
+
       if (showGuides) {
         // Super cell boundaries
         ctx.strokeStyle = 'rgba(0, 0, 0, 0.25)'
@@ -332,6 +376,7 @@ export function PatternCanvas(props: Props) {
       y: number
       scale: number
       guides: boolean
+      grid: number
       highlight: number | null
       w: number
       h: number
@@ -346,6 +391,7 @@ export function PatternCanvas(props: Props) {
       y: 0,
       scale: 0,
       guides: false,
+      grid: 0,
       highlight: null,
       w: 0,
       h: 0,
@@ -354,7 +400,7 @@ export function PatternCanvas(props: Props) {
 
     let needsResetView = true
     const tick = () => {
-      const { engine, showGuides, highlightVariant } = propsRef.current
+      const { engine, showGuides, gridDivisions, highlightVariant } = propsRef.current
       if (engine !== last.engine) {
         resize()
         needsResetView = true
@@ -377,6 +423,7 @@ export function PatternCanvas(props: Props) {
         view.y === last.y &&
         view.scale === last.scale &&
         showGuides === last.guides &&
+        gridDivisions === last.grid &&
         highlightVariant === last.highlight &&
         cssW === last.w &&
         cssH === last.h &&
@@ -396,6 +443,7 @@ export function PatternCanvas(props: Props) {
         y: view.y,
         scale: view.scale,
         guides: showGuides,
+        grid: gridDivisions,
         highlight: highlightVariant,
         w: cssW,
         h: cssH,
