@@ -1,64 +1,100 @@
-// Save / load of Moyou pattern files: a square cell PNG with pattern
-// metadata stored in a tEXt chunk. If the metadata is stripped (e.g. by an
-// image host), the image still loads as a plain cell and only the pattern
-// parameters are lost.
+// Save / load of Moyou pattern files: the super cell (the arrangement of
+// cell variants that actually repeats) as a PNG with pattern metadata in a
+// tEXt chunk. If the metadata is stripped (e.g. by an image host), the
+// image still loads as a plain single cell and only the pattern structure
+// is lost.
 
-import { PatternParams } from './engine'
+import { Layout, layoutVariantCount, PatternParams, SINGLE_LAYOUT } from './engine'
 import { encodePng, readTextChunks } from './png'
 
 export const METADATA_KEYWORD = 'moyou'
 
 export type MoyouMetadata = {
-  version: 1
+  version: 2
+  // Per-cell size; the image itself is (cols * w) × (rows * h)
   w: number
   h: number
   shift: number
   flipX: boolean
   flipY: boolean
+  cols: number
+  rows: number
+  map: number[]
 }
 
 export type LoadedPattern = {
-  width: number
-  height: number
+  cellWidth: number
+  cellHeight: number
+  layout: Layout
+  // variantCount * cellWidth * cellHeight * 4 bytes
   data: Uint8ClampedArray
   params: PatternParams | undefined
 }
 
 export const MAX_CELL_SIZE = 1024
+export const MAX_IMAGE_SIZE = 4096
 
 export async function encodePatternPng(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
+  superData: Uint8ClampedArray,
+  cellWidth: number,
+  cellHeight: number,
+  layout: Layout,
   params: PatternParams
 ): Promise<Uint8Array> {
   const meta: MoyouMetadata = {
-    version: 1,
-    w: width,
-    h: height,
+    version: 2,
+    w: cellWidth,
+    h: cellHeight,
     shift: params.shift,
     flipX: params.flipX,
-    flipY: params.flipY
+    flipY: params.flipY,
+    cols: layout.cols,
+    rows: layout.rows,
+    map: layout.map
   }
-  return encodePng(data, width, height, { [METADATA_KEYWORD]: JSON.stringify(meta) })
+  return encodePng(superData, layout.cols * cellWidth, layout.rows * cellHeight, {
+    [METADATA_KEYWORD]: JSON.stringify(meta)
+  })
 }
 
-function parseMetadata(text: string | undefined): MoyouMetadata | undefined {
+type ParsedMetadata = {
+  w: number
+  h: number
+  layout: Layout
+  params: PatternParams
+}
+
+function isValidLayout(cols: unknown, rows: unknown, map: unknown): map is number[] {
+  if (typeof cols !== 'number' || !Number.isInteger(cols) || cols < 1 || cols > 8) return false
+  if (typeof rows !== 'number' || !Number.isInteger(rows) || rows < 1 || rows > 8) return false
+  if (!Array.isArray(map) || map.length !== cols * rows) return false
+  return map.every((v) => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < 16)
+}
+
+function parseMetadata(text: string | undefined): ParsedMetadata | undefined {
   if (text === undefined) return undefined
   try {
     const raw: unknown = JSON.parse(text)
     if (typeof raw !== 'object' || raw === null) return undefined
     const m = raw as Record<string, unknown>
-    if (m.version !== 1) return undefined
     if (typeof m.w !== 'number' || typeof m.h !== 'number') return undefined
-    return {
-      version: 1,
-      w: m.w,
-      h: m.h,
+    const params: PatternParams = {
       shift: typeof m.shift === 'number' ? m.shift : 0,
       flipX: m.flipX === true,
       flipY: m.flipY === true
     }
+    if (m.version === 1) {
+      return { w: m.w, h: m.h, layout: SINGLE_LAYOUT, params }
+    }
+    if (m.version === 2 && isValidLayout(m.cols, m.rows, m.map)) {
+      return {
+        w: m.w,
+        h: m.h,
+        layout: { cols: m.cols as number, rows: m.rows as number, map: m.map },
+        params
+      }
+    }
+    return undefined
   } catch {
     return undefined
   }
@@ -66,16 +102,16 @@ function parseMetadata(text: string | undefined): MoyouMetadata | undefined {
 
 // Decodes any browser-supported image file. PNG metadata is parsed from the
 // raw bytes; pixels are decoded by the browser so re-saved / foreign PNGs
-// load too.
+// load too (as a plain single cell).
 export async function decodePatternFile(file: Blob): Promise<LoadedPattern> {
   const bytes = new Uint8Array(await file.arrayBuffer())
   const meta = parseMetadata(readTextChunks(bytes)[METADATA_KEYWORD])
 
   const bitmap = await createImageBitmap(file)
   const { width, height } = bitmap
-  if (width > MAX_CELL_SIZE || height > MAX_CELL_SIZE) {
+  if (width > MAX_IMAGE_SIZE || height > MAX_IMAGE_SIZE) {
     bitmap.close()
-    throw new Error(`画像が大きすぎます（最大 ${MAX_CELL_SIZE}×${MAX_CELL_SIZE} px）`)
+    throw new Error(`画像が大きすぎます（最大 ${MAX_IMAGE_SIZE}×${MAX_IMAGE_SIZE} px）`)
   }
   const canvas = document.createElement('canvas')
   canvas.width = width
@@ -83,14 +119,43 @@ export async function decodePatternFile(file: Blob): Promise<LoadedPattern> {
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!
   ctx.drawImage(bitmap, 0, 0)
   bitmap.close()
-  const imageData = ctx.getImageData(0, 0, width, height)
+  const image = ctx.getImageData(0, 0, width, height)
 
-  const params: PatternParams | undefined =
-    meta !== undefined && meta.w === width && meta.h === height
-      ? { shift: meta.shift, flipX: meta.flipX, flipY: meta.flipY }
-      : undefined
+  const structureValid =
+    meta !== undefined &&
+    meta.w <= MAX_CELL_SIZE &&
+    meta.h <= MAX_CELL_SIZE &&
+    meta.layout.cols * meta.w === width &&
+    meta.layout.rows * meta.h === height
 
-  return { width, height, data: new Uint8ClampedArray(imageData.data), params }
+  if (!structureValid) {
+    if (width > MAX_CELL_SIZE || height > MAX_CELL_SIZE) {
+      throw new Error(`画像が大きすぎます（最大 ${MAX_CELL_SIZE}×${MAX_CELL_SIZE} px）`)
+    }
+    return {
+      cellWidth: width,
+      cellHeight: height,
+      layout: SINGLE_LAYOUT,
+      data: new Uint8ClampedArray(image.data),
+      params: undefined
+    }
+  }
+
+  // Slice the super cell image back into variant buffers. Duplicate grid
+  // positions of the same variant just overwrite each other (they are
+  // identical in files we wrote ourselves).
+  const { w, h, layout } = meta
+  const data = new Uint8ClampedArray(layoutVariantCount(layout) * w * h * 4)
+  for (let j = 0; j < layout.map.length; j++) {
+    const gx = j % layout.cols
+    const gy = (j / layout.cols) | 0
+    const v = layout.map[j]
+    for (let y = 0; y < h; y++) {
+      const src = ((gy * h + y) * width + gx * w) * 4
+      data.set(image.data.subarray(src, src + w * 4), (v * h + y) * w * 4)
+    }
+  }
+  return { cellWidth: w, cellHeight: h, layout, data, params: meta.params }
 }
 
 export function downloadBytes(bytes: Uint8Array, filename: string): void {

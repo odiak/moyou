@@ -17,15 +17,24 @@ import {
   ZoomIn,
   ZoomOut
 } from 'lucide-react'
-import { CellEngine, MAX_BRUSH_SIZE, packColor } from './lib/engine'
+import {
+  Layout,
+  layoutVariantCount,
+  LayoutTemplate,
+  MAX_BRUSH_SIZE,
+  packColor,
+  PatternEngine,
+  SINGLE_LAYOUT
+} from './lib/engine'
 import { decodePatternFile, downloadBytes, encodePatternPng } from './lib/moyouFile'
+import { LayoutPanel } from './LayoutPanel'
 import { CanvasApi, PatternCanvas, Tool } from './PatternCanvas'
 
 const CELL_SIZES = [128, 256, 512]
 const MAX_UNDO = 50
 
-function createEngine(size: number): CellEngine {
-  const engine = new CellEngine(size, size)
+function createEngine(size: number, layout: Layout = SINGLE_LAYOUT): PatternEngine {
+  const engine = new PatternEngine(size, size, layout)
   engine.fillAll(packColor(0xffffff))
   return engine
 }
@@ -45,6 +54,7 @@ export function App() {
   const [flipX, setFlipX] = useState(false)
   const [flipY, setFlipY] = useState(false)
   const [showGuides, setShowGuides] = useState(true)
+  const [highlightVariant, setHighlightVariant] = useState<number | null>(null)
   const [newDialogOpen, setNewDialogOpen] = useState(false)
   const [, setHistoryVersion] = useState(0)
 
@@ -54,7 +64,7 @@ export function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Pattern params live on the engine (the canvas render loop watches them)
-  engine.params.shift = Math.round(shiftFrac * engine.width)
+  engine.params.shift = Math.round(shiftFrac * engine.superWidth)
   engine.params.flipX = flipX
   engine.params.flipY = flipY
 
@@ -93,12 +103,12 @@ export function App() {
   }, [engine])
 
   const replaceEngine = useCallback(
-    (next: CellEngine, params?: { shift: number; flipX: boolean; flipY: boolean }) => {
+    (next: PatternEngine, params?: { shift: number; flipX: boolean; flipY: boolean }) => {
       undoRef.current = []
       redoRef.current = []
       if (params !== undefined) {
         next.params = { ...params }
-        setShiftFrac(next.width > 0 ? params.shift / next.width : 0)
+        setShiftFrac(next.superWidth > 0 ? params.shift / next.superWidth : 0)
         setFlipX(params.flipX)
         setFlipY(params.flipY)
       } else {
@@ -106,14 +116,46 @@ export function App() {
         setFlipX(false)
         setFlipY(false)
       }
+      setHighlightVariant(null)
       setEngine(next)
       bumpHistory()
     },
     []
   )
 
+  // Switches the variant arrangement, keeping the current appearance: each
+  // new variant is initialized from whatever was shown at its first grid
+  // position in the old arrangement.
+  const changeLayout = useCallback(
+    (template: LayoutTemplate) => {
+      const layout = template.layout
+      if (layout === engine.layout) return
+      const next = new PatternEngine(engine.width, engine.height, layout)
+      const old = engine.layout
+      for (let v = 0; v < layoutVariantCount(layout); v++) {
+        const j = layout.map.indexOf(v)
+        const gx = j % layout.cols
+        const gy = (j / layout.cols) | 0
+        const oldV = old.map[(gy % old.rows) * old.cols + (gx % old.cols)]
+        next.cellData(v).set(engine.cellData(oldV))
+      }
+      undoRef.current = []
+      redoRef.current = []
+      setHighlightVariant(null)
+      setEngine(next)
+      bumpHistory()
+    },
+    [engine]
+  )
+
   const savePattern = useCallback(async () => {
-    const bytes = await encodePatternPng(engine.data, engine.width, engine.height, engine.params)
+    const bytes = await encodePatternPng(
+      engine.composeSuperData(),
+      engine.width,
+      engine.height,
+      engine.layout,
+      engine.params
+    )
     downloadBytes(bytes, `moyou-${timestamp()}.png`)
   }, [engine])
 
@@ -121,7 +163,12 @@ export function App() {
     async (file: Blob) => {
       try {
         const loaded = await decodePatternFile(file)
-        const next = new CellEngine(loaded.width, loaded.height, loaded.data)
+        const next = new PatternEngine(
+          loaded.cellWidth,
+          loaded.cellHeight,
+          loaded.layout,
+          loaded.data
+        )
         replaceEngine(next, loaded.params)
       } catch (e) {
         alert(e instanceof Error ? e.message : 'ファイルを読み込めませんでした')
@@ -229,6 +276,7 @@ export function App() {
         color={color}
         brushSize={brushSize}
         showGuides={showGuides}
+        highlightVariant={highlightVariant}
         onPickColor={(c) => {
           setColor(c)
           setTool('pen')
@@ -315,6 +363,14 @@ export function App() {
         {toolButton('pan', <Hand size={20} />, '移動 (H / Space)')}
       </div>
 
+      {/* Arrangement & variants */}
+      <LayoutPanel
+        engine={engine}
+        highlightVariant={highlightVariant}
+        onSelectTemplate={changeLayout}
+        onSetHighlight={setHighlightVariant}
+      />
+
       {/* Bottom bar */}
       <div className="absolute bottom-3 left-3 right-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl bg-white/95 px-4 py-2 shadow-lg backdrop-blur">
         <label className="flex items-center gap-2" title="色">
@@ -350,7 +406,7 @@ export function App() {
             className="w-24 sm:w-32"
           />
           <span className="w-10 text-right tabular-nums">
-            {Math.round(shiftFrac * engine.width)}px
+            {Math.round(shiftFrac * engine.superWidth)}px
           </span>
         </label>
         {toggleButton(
@@ -368,7 +424,8 @@ export function App() {
         )}
         <div className="flex-1" />
         <span className="hidden text-xs text-gray-400 sm:inline">
-          {engine.width}×{engine.height}px
+          セル {engine.width}×{engine.height}px
+          {engine.variantCount > 1 && `（${engine.variantCount}種）`}
         </span>
       </div>
 

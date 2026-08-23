@@ -1,18 +1,45 @@
-// Moyou's drawing engine: a single square cell buffer with a torus wrap
-// mapping from world coordinates to cell coordinates. Brush mask, stroke
-// stamping and packing helpers are adapted from kakeru's
-// packages/paint-core/src/engine.ts, with the tile system removed.
+// Moyou's drawing engine: one or more square cell buffers (variants) tiled
+// on the infinite plane via a torus wrap mapping from world coordinates.
+// Variants are arranged in a "super cell" grid (e.g. checkerboard) which is
+// what actually repeats. Brush mask, stroke stamping and packing helpers are
+// adapted from kakeru's packages/paint-core/src/engine.ts, with the tile
+// system removed.
 
 export const MAX_BRUSH_SIZE = 64
 
 export type PatternParams = {
-  // Horizontal shift in cell pixels applied per vertical repeat (brick /
-  // half-drop patterns)
+  // Horizontal shift in pixels applied per vertical repeat of the super
+  // cell (brick / half-drop patterns)
   shift: number
-  // Mirror every other column / row of cells
+  // Mirror every other column / row of super cells
   flipX: boolean
   flipY: boolean
 }
+
+// Arrangement of cell variants inside the super cell: map[gy * cols + gx]
+// is the variant index shown at that grid position.
+export type Layout = { cols: number; rows: number; map: number[] }
+
+export const SINGLE_LAYOUT: Layout = { cols: 1, rows: 1, map: [0] }
+
+export function layoutVariantCount(layout: Layout): number {
+  return Math.max(...layout.map) + 1
+}
+
+export function sameLayout(a: Layout, b: Layout): boolean {
+  return a.cols === b.cols && a.rows === b.rows && a.map.join(',') === b.map.join(',')
+}
+
+export type LayoutTemplate = { id: string; label: string; layout: Layout }
+
+export const LAYOUT_TEMPLATES: LayoutTemplate[] = [
+  { id: 'single', label: '単一', layout: SINGLE_LAYOUT },
+  { id: 'cols2', label: '横2種', layout: { cols: 2, rows: 1, map: [0, 1] } },
+  { id: 'rows2', label: '縦2種', layout: { cols: 1, rows: 2, map: [0, 1] } },
+  { id: 'checker', label: '市松（2種）', layout: { cols: 2, rows: 2, map: [0, 1, 1, 0] } },
+  { id: 'quad', label: '田の字（4種）', layout: { cols: 2, rows: 2, map: [0, 1, 2, 3] } },
+  { id: 'cols4', label: '横4種', layout: { cols: 4, rows: 1, map: [0, 1, 2, 3] } }
+]
 
 const brushMaskCache = new Map<number, Int32Array>()
 
@@ -73,51 +100,80 @@ function mod(a: number, b: number): number {
   return ((a % b) + b) % b
 }
 
-export class CellEngine {
-  readonly width: number
+export class PatternEngine {
+  readonly width: number // per-cell size
   readonly height: number
+  readonly layout: Layout
+  readonly variantCount: number
+  // All variants in one buffer, stacked vertically: variant v occupies
+  // bytes [v * width * height * 4, (v + 1) * width * height * 4)
   readonly data: Uint8ClampedArray
   readonly words: Uint32Array
   params: PatternParams = { shift: 0, flipX: false, flipY: false }
   // Incremented on every mutation; used by the renderer to know when to
-  // re-upload the cell to its canvas
+  // re-upload the cells to their canvases
   revision = 0
 
-  constructor(width: number, height: number, data?: Uint8ClampedArray) {
+  constructor(width: number, height: number, layout: Layout, data?: Uint8ClampedArray) {
     this.width = width
     this.height = height
+    this.layout = layout
+    this.variantCount = layoutVariantCount(layout)
+    const length = this.variantCount * width * height * 4
     if (data !== undefined) {
-      if (data.length !== width * height * 4) throw new Error('CellEngine: invalid data length')
+      if (data.length !== length) throw new Error('PatternEngine: invalid data length')
       this.data = data
     } else {
-      this.data = new Uint8ClampedArray(width * height * 4)
+      this.data = new Uint8ClampedArray(length)
     }
-    this.words = new Uint32Array(this.data.buffer, this.data.byteOffset, width * height)
+    this.words = new Uint32Array(this.data.buffer, this.data.byteOffset, length / 4)
   }
 
-  // World coordinates → cell coordinates (torus wrap with shift and
-  // alternating mirror)
-  mapPoint(wx: number, wy: number): [number, number] {
-    const { width: w, height: h } = this
+  get superWidth(): number {
+    return this.layout.cols * this.width
+  }
+
+  get superHeight(): number {
+    return this.layout.rows * this.height
+  }
+
+  // The pixel data of one variant (a view into the shared buffer)
+  cellData(variant: number): Uint8ClampedArray {
+    const size = this.width * this.height * 4
+    return this.data.subarray(variant * size, (variant + 1) * size)
+  }
+
+  // World coordinates → flat pixel index (variant * w * h + cy * w + cx).
+  // Torus wrap of the super cell with shift and alternating mirror, then
+  // the layout grid picks the variant.
+  mapPoint(wx: number, wy: number): number {
+    const { width: w, height: h, layout } = this
+    const W = layout.cols * w
+    const H = layout.rows * h
     const { shift, flipX, flipY } = this.params
-    const k = floorDiv(wy, h)
-    let cy = wy - k * h
+    const k = floorDiv(wy, H)
+    let yy = wy - k * H
     const xs = wx - k * shift
-    const i = floorDiv(xs, w)
-    let cx = xs - i * w
-    if (flipX && mod(i, 2) === 1) cx = w - 1 - cx
-    if (flipY && mod(k, 2) === 1) cy = h - 1 - cy
-    return [cx, cy]
+    const i = floorDiv(xs, W)
+    let xx = xs - i * W
+    if (flipX && mod(i, 2) === 1) xx = W - 1 - xx
+    if (flipY && mod(k, 2) === 1) yy = H - 1 - yy
+    const gx = (xx / w) | 0
+    const gy = (yy / h) | 0
+    const v = layout.map[gy * layout.cols + gx]
+    return (v * h + (yy - gy * h)) * w + (xx - gx * w)
+  }
+
+  variantOfIndex(index: number): number {
+    return (index / (this.width * this.height)) | 0
   }
 
   readWorldPixel(wx: number, wy: number): number {
-    const [cx, cy] = this.mapPoint(wx, wy)
-    return this.words[cy * this.width + cx]
+    return this.words[this.mapPoint(wx, wy)]
   }
 
   private writeWorldPixel(wx: number, wy: number, packed: number): void {
-    const [cx, cy] = this.mapPoint(wx, wy)
-    this.words[cy * this.width + cx] = packed
+    this.words[this.mapPoint(wx, wy)] = packed
   }
 
   fillAll(packed: number): void {
@@ -172,29 +228,45 @@ export class CellEngine {
   }
 
   // Flood fill seeded at a world coordinate. The flood walks in world space
-  // so that adjacency across cell seams (including shift and mirror) is
-  // exactly what the user sees; visited tracking is per cell pixel, so it
-  // always terminates (the cell is finite).
+  // so that adjacency across cell seams (including shift, mirror and the
+  // variant grid) is exactly what the user sees; visited tracking is per
+  // cell pixel, so it always terminates.
   fillAtWorld(wx: number, wy: number, packed: number): void {
-    const { width: w, height: h } = this
-    const [sx, sy] = this.mapPoint(wx, wy)
-    const target = this.words[sy * w + sx]
+    const target = this.words[this.mapPoint(wx, wy)]
     if (target === packed) return
 
-    const visited = new Uint8Array(w * h)
+    const visited = new Uint8Array(this.words.length)
     const stack: number[] = [wx, wy]
     while (stack.length > 0) {
       const y = stack.pop()!
       const x = stack.pop()!
-      const [cx, cy] = this.mapPoint(x, y)
-      const idx = cy * w + cx
-      if (visited[idx]) continue
-      if (this.words[idx] !== target) continue
-      visited[idx] = 1
-      this.words[idx] = packed
+      const index = this.mapPoint(x, y)
+      if (visited[index]) continue
+      visited[index] = 1
+      if (this.words[index] !== target) continue
+      this.words[index] = packed
       stack.push(x + 1, y, x - 1, y, x, y + 1, x, y - 1)
     }
     this.revision++
+  }
+
+  // Composes the full super cell (what actually repeats) as RGBA pixels;
+  // used for PNG export.
+  composeSuperData(): Uint8ClampedArray {
+    const { width: w, height: h, layout } = this
+    const W = this.superWidth
+    const out = new Uint8ClampedArray(W * this.superHeight * 4)
+    for (let j = 0; j < layout.map.length; j++) {
+      const gx = j % layout.cols
+      const gy = (j / layout.cols) | 0
+      const v = layout.map[j]
+      for (let y = 0; y < h; y++) {
+        const src = (v * h + y) * w * 4
+        const dst = ((gy * h + y) * W + gx * w) * 4
+        out.set(this.data.subarray(src, src + w * 4), dst)
+      }
+    }
+    return out
   }
 
   snapshot(): Uint8ClampedArray {

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { CellEngine, packColor, TRANSPARENT, unpackColor } from './lib/engine'
+import { packColor, PatternEngine, TRANSPARENT, unpackColor } from './lib/engine'
 
 export type Tool = 'pen' | 'eraser' | 'fill' | 'eyedropper' | 'pan'
 
@@ -9,11 +9,13 @@ export type CanvasApi = {
 }
 
 type Props = {
-  engine: CellEngine
+  engine: PatternEngine
   tool: Tool
   color: string
   brushSize: number
   showGuides: boolean
+  // Cells of this variant get an accent outline (visual aid only)
+  highlightVariant: number | null
   onPickColor: (hex: string) => void
   onBeforeMutate: () => void
   onCancelStroke: () => void
@@ -63,10 +65,11 @@ export function PatternCanvas(props: Props) {
     const canvas = canvasRef.current!
     const ctx = canvas.getContext('2d')!
 
-    const cellCanvas = document.createElement('canvas')
-    const cellCtx = cellCanvas.getContext('2d')!
-    let cellImageData: ImageData | null = null
-    let uploadedEngine: CellEngine | null = null
+    // The super cell (variant arrangement) rendered as one image
+    const superCanvas = document.createElement('canvas')
+    const superCtx = superCanvas.getContext('2d')!
+    let variantImages: ImageData[] = []
+    let uploadedEngine: PatternEngine | null = null
     let uploadedRevision = -1
 
     let cssW = 0
@@ -75,7 +78,7 @@ export function PatternCanvas(props: Props) {
 
     const minScale = (): number => {
       const { engine } = propsRef.current
-      return Math.max(cssW / (engine.width * 48), cssH / (engine.height * 48), 1 / 16)
+      return Math.max(cssW / (engine.superWidth * 48), cssH / (engine.superHeight * 48), 1 / 16)
     }
 
     const clampScale = (s: number): number => Math.min(MAX_SCALE, Math.max(minScale(), s))
@@ -83,10 +86,10 @@ export function PatternCanvas(props: Props) {
     const resetView = () => {
       const { engine } = propsRef.current
       const view = viewRef.current
-      const target = Math.min(cssW / (engine.width * 3), cssH / (engine.height * 3))
-      view.scale = clampScale(Math.min(8, Math.max(1, target)))
-      view.x = engine.width / 2 - cssW / (2 * view.scale)
-      view.y = engine.height / 2 - cssH / (2 * view.scale)
+      const target = Math.min(cssW / (engine.superWidth * 3), cssH / (engine.superHeight * 3))
+      view.scale = clampScale(Math.min(8, Math.max(0.5, target)))
+      view.x = engine.superWidth / 2 - cssW / (2 * view.scale)
+      view.y = engine.superHeight / 2 - cssH / (2 * view.scale)
     }
 
     const zoomAt = (px: number, py: number, factor: number) => {
@@ -122,21 +125,31 @@ export function PatternCanvas(props: Props) {
     }
 
     const render = () => {
-      const { engine, showGuides } = propsRef.current
+      const { engine, showGuides, highlightVariant } = propsRef.current
       const view = viewRef.current
       const { width: w, height: h } = engine
+      const { cols, rows, map } = engine.layout
+      const W = engine.superWidth
+      const H = engine.superHeight
       const { shift, flipX, flipY } = engine.params
 
-      // Upload the cell buffer to the cell canvas if it changed
+      // Upload the variant buffers to the super cell canvas if they changed
       if (uploadedEngine !== engine) {
-        cellCanvas.width = w
-        cellCanvas.height = h
-        cellImageData = new ImageData(engine.data as Uint8ClampedArray<ArrayBuffer>, w, h)
+        superCanvas.width = W
+        superCanvas.height = H
+        variantImages = []
+        for (let v = 0; v < engine.variantCount; v++) {
+          variantImages.push(
+            new ImageData(engine.cellData(v) as Uint8ClampedArray<ArrayBuffer>, w, h)
+          )
+        }
         uploadedEngine = engine
         uploadedRevision = -1
       }
       if (uploadedRevision !== engine.revision) {
-        cellCtx.putImageData(cellImageData!, 0, 0)
+        for (let j = 0; j < map.length; j++) {
+          superCtx.putImageData(variantImages[map[j]], (j % cols) * w, ((j / cols) | 0) * h)
+        }
         uploadedRevision = engine.revision
       }
 
@@ -146,52 +159,103 @@ export function PatternCanvas(props: Props) {
       ctx.imageSmoothingEnabled = false
 
       const s = view.scale
-      const k0 = Math.floor(view.y / h)
-      const k1 = Math.floor((view.y + cssH / s) / h)
+      const highlightRects: number[] = []
+      const k0 = Math.floor(view.y / H)
+      const k1 = Math.floor((view.y + cssH / s) / H)
       for (let k = k0; k <= k1; k++) {
         const rowShift = k * shift
-        const i0 = Math.floor((view.x - rowShift) / w)
-        const i1 = Math.floor((view.x + cssW / s - rowShift) / w)
-        const sy0 = Math.round((k * h - view.y) * s)
-        const sy1 = Math.round(((k + 1) * h - view.y) * s)
+        const i0 = Math.floor((view.x - rowShift) / W)
+        const i1 = Math.floor((view.x + cssW / s - rowShift) / W)
+        const sy0 = Math.round((k * H - view.y) * s)
+        const sy1 = Math.round(((k + 1) * H - view.y) * s)
         const fy = flipY && mod(k, 2) === 1
         for (let i = i0; i <= i1; i++) {
-          const x0 = i * w + rowShift
+          const x0 = i * W + rowShift
           const sx0 = Math.round((x0 - view.x) * s)
-          const sx1 = Math.round((x0 + w - view.x) * s)
+          const sx1 = Math.round((x0 + W - view.x) * s)
           const fx = flipX && mod(i, 2) === 1
           if (!fx && !fy) {
-            ctx.drawImage(cellCanvas, sx0, sy0, sx1 - sx0, sy1 - sy0)
+            ctx.drawImage(superCanvas, sx0, sy0, sx1 - sx0, sy1 - sy0)
           } else {
             ctx.save()
             ctx.translate(fx ? sx1 : sx0, fy ? sy1 : sy0)
             ctx.scale(fx ? -1 : 1, fy ? -1 : 1)
-            ctx.drawImage(cellCanvas, 0, 0, sx1 - sx0, sy1 - sy0)
+            ctx.drawImage(superCanvas, 0, 0, sx1 - sx0, sy1 - sy0)
             ctx.restore()
+          }
+          if (highlightVariant !== null) {
+            for (let j = 0; j < map.length; j++) {
+              if (map[j] !== highlightVariant) continue
+              const gx = j % cols
+              const gy = (j / cols) | 0
+              // Mirrored instances show this grid cell at the mirrored spot
+              const dgx = fx ? cols - 1 - gx : gx
+              const dgy = fy ? rows - 1 - gy : gy
+              highlightRects.push((x0 + dgx * w - view.x) * s, (k * H + dgy * h - view.y) * s)
+            }
           }
         }
       }
 
       if (showGuides) {
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)'
+        // Super cell boundaries
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.25)'
         ctx.lineWidth = 1
         ctx.beginPath()
         for (let k = k0; k <= k1 + 1; k++) {
-          const y = (k * h - view.y) * s
+          const y = (k * H - view.y) * s
           ctx.moveTo(0, y)
           ctx.lineTo(cssW, y)
         }
         for (let k = k0; k <= k1; k++) {
           const rowShift = k * shift
-          const yTop = Math.max(0, (k * h - view.y) * s)
-          const yBottom = Math.min(cssH, ((k + 1) * h - view.y) * s)
-          const i0 = Math.floor((view.x - rowShift) / w)
-          const i1 = Math.floor((view.x + cssW / s - rowShift) / w) + 1
+          const yTop = Math.max(0, (k * H - view.y) * s)
+          const yBottom = Math.min(cssH, ((k + 1) * H - view.y) * s)
+          const i0 = Math.floor((view.x - rowShift) / W)
+          const i1 = Math.floor((view.x + cssW / s - rowShift) / W) + 1
           for (let i = i0; i <= i1; i++) {
-            const x = (i * w + rowShift - view.x) * s
+            const x = (i * W + rowShift - view.x) * s
             ctx.moveTo(x, yTop)
             ctx.lineTo(x, yBottom)
           }
+        }
+        ctx.stroke()
+
+        // Inner cell boundaries (lighter)
+        if (cols > 1 || rows > 1) {
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.1)'
+          ctx.beginPath()
+          for (let k = k0; k <= k1; k++) {
+            for (let r = 1; r < rows; r++) {
+              const y = (k * H + r * h - view.y) * s
+              ctx.moveTo(0, y)
+              ctx.lineTo(cssW, y)
+            }
+            if (cols > 1) {
+              const rowShift = k * shift
+              const yTop = Math.max(0, (k * H - view.y) * s)
+              const yBottom = Math.min(cssH, ((k + 1) * H - view.y) * s)
+              const i0 = Math.floor((view.x - rowShift) / W)
+              const i1 = Math.floor((view.x + cssW / s - rowShift) / W)
+              for (let i = i0; i <= i1; i++) {
+                for (let c = 1; c < cols; c++) {
+                  const x = (i * W + rowShift + c * w - view.x) * s
+                  ctx.moveTo(x, yTop)
+                  ctx.lineTo(x, yBottom)
+                }
+              }
+            }
+          }
+          ctx.stroke()
+        }
+      }
+
+      if (highlightRects.length > 0) {
+        ctx.strokeStyle = 'rgba(2, 132, 199, 0.9)'
+        ctx.lineWidth = 2
+        ctx.beginPath()
+        for (let r = 0; r < highlightRects.length; r += 2) {
+          ctx.rect(highlightRects[r] + 1, highlightRects[r + 1] + 1, w * s - 2, h * s - 2)
         }
         ctx.stroke()
       }
@@ -201,7 +265,7 @@ export function PatternCanvas(props: Props) {
     // setInterval rather than requestAnimationFrame so it also works in
     // throttled/background tabs; the actual render only runs on change.
     let last: {
-      engine: CellEngine | null
+      engine: PatternEngine | null
       revision: number
       shift: number
       flipX: boolean
@@ -210,6 +274,7 @@ export function PatternCanvas(props: Props) {
       y: number
       scale: number
       guides: boolean
+      highlight: number | null
       w: number
       h: number
       dpr: number
@@ -223,6 +288,7 @@ export function PatternCanvas(props: Props) {
       y: 0,
       scale: 0,
       guides: false,
+      highlight: null,
       w: 0,
       h: 0,
       dpr: 0
@@ -230,7 +296,7 @@ export function PatternCanvas(props: Props) {
 
     let needsResetView = true
     const tick = () => {
-      const { engine, showGuides } = propsRef.current
+      const { engine, showGuides, highlightVariant } = propsRef.current
       if (engine !== last.engine) {
         resize()
         needsResetView = true
@@ -253,6 +319,7 @@ export function PatternCanvas(props: Props) {
         view.y === last.y &&
         view.scale === last.scale &&
         showGuides === last.guides &&
+        highlightVariant === last.highlight &&
         cssW === last.w &&
         cssH === last.h &&
         dpr === last.dpr
@@ -271,6 +338,7 @@ export function PatternCanvas(props: Props) {
         y: view.y,
         scale: view.scale,
         guides: showGuides,
+        highlight: highlightVariant,
         w: cssW,
         h: cssH,
         dpr
