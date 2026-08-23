@@ -19,11 +19,10 @@ import {
 } from 'lucide-react'
 import {
   Layout,
-  layoutVariantCount,
-  LayoutTemplate,
   MAX_BRUSH_SIZE,
   packColor,
   PatternEngine,
+  sameLayout,
   SINGLE_LAYOUT
 } from './lib/engine'
 import { decodePatternFile, downloadBytes, encodePatternPng } from './lib/moyouFile'
@@ -123,29 +122,46 @@ export function App() {
     []
   )
 
-  // Switches the variant arrangement, keeping the current appearance: each
-  // new variant is initialized from whatever was shown at its first grid
-  // position in the old arrangement.
+  // Switches the variant arrangement. Variants keep their identity (cell A
+  // stays cell A, new ones start as copies), so reshuffling a random
+  // arrangement never scrambles which drawing belongs to which cell.
   const changeLayout = useCallback(
-    (template: LayoutTemplate) => {
-      const layout = template.layout
-      if (layout === engine.layout) return
+    (layout: Layout) => {
+      if (sameLayout(layout, engine.layout)) return
       const next = new PatternEngine(engine.width, engine.height, layout)
-      const old = engine.layout
-      for (let v = 0; v < layoutVariantCount(layout); v++) {
-        const j = layout.map.indexOf(v)
-        const gx = j % layout.cols
-        const gy = (j / layout.cols) | 0
-        const oldV = old.map[(gy % old.rows) * old.cols + (gx % old.cols)]
-        next.cellData(v).set(engine.cellData(oldV))
+      for (let v = 0; v < next.variantCount; v++) {
+        next.cellData(v).set(engine.cellData(v % engine.variantCount))
       }
-      undoRef.current = []
-      redoRef.current = []
-      setHighlightVariant(null)
+      // Undo snapshots stay valid as long as the buffer shape is unchanged
+      if (next.data.length !== engine.data.length) {
+        undoRef.current = []
+        redoRef.current = []
+      }
+      setHighlightVariant((hl) => (hl !== null && hl < next.variantCount ? hl : null))
       setEngine(next)
       bumpHistory()
     },
     [engine]
+  )
+
+  // Random arrangement: an n×n block of random variants (and optionally
+  // random quarter-turn rotations) that repeats as one big super cell.
+  const generateRandomLayout = useCallback(
+    (count: number, withRotation: boolean) => {
+      // Keep the exported super cell PNG within reasonable bounds
+      const size = engine.width >= 512 ? 4 : 8
+      const n = size * size
+      let map: number[]
+      do {
+        map = Array.from({ length: n }, () => Math.floor(Math.random() * count))
+      } while (new Set(map).size < count)
+      const layout: Layout = { cols: size, rows: size, map }
+      if (withRotation) {
+        layout.rot = Array.from({ length: n }, () => Math.floor(Math.random() * 4))
+      }
+      changeLayout(layout)
+    },
+    [engine, changeLayout]
   )
 
   const savePattern = useCallback(async () => {
@@ -367,7 +383,8 @@ export function App() {
       <LayoutPanel
         engine={engine}
         highlightVariant={highlightVariant}
-        onSelectTemplate={changeLayout}
+        onSelectLayout={changeLayout}
+        onGenerateRandom={generateRandomLayout}
         onSetHighlight={setHighlightVariant}
       />
 

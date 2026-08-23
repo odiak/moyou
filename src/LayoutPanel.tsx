@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react'
-import { Layout, LAYOUT_TEMPLATES, LayoutTemplate, PatternEngine, sameLayout } from './lib/engine'
+import { useEffect, useRef, useState } from 'react'
+import { Dices } from 'lucide-react'
+import { Layout, LAYOUT_TEMPLATES, PatternEngine, sameLayout } from './lib/engine'
 
 const VARIANT_COLORS = ['#7dd3fc', '#fcd34d', '#6ee7b7', '#c4b5fd']
 const VARIANT_LABELS = ['A', 'B', 'C', 'D']
@@ -7,7 +8,8 @@ const VARIANT_LABELS = ['A', 'B', 'C', 'D']
 type Props = {
   engine: PatternEngine
   highlightVariant: number | null
-  onSelectTemplate: (template: LayoutTemplate) => void
+  onSelectLayout: (layout: Layout) => void
+  onGenerateRandom: (count: number, withRotation: boolean) => void
   onSetHighlight: (variant: number | null) => void
 }
 
@@ -61,9 +63,19 @@ function VariantThumb({ engine, variant }: { engine: PatternEngine; variant: num
   return <canvas ref={ref} className="h-9 w-9 rounded-md bg-white" />
 }
 
-export function LayoutPanel({ engine, highlightVariant, onSelectTemplate, onSetHighlight }: Props) {
+export function LayoutPanel({
+  engine,
+  highlightVariant,
+  onSelectLayout,
+  onGenerateRandom,
+  onSetHighlight
+}: Props) {
+  const [randomCount, setRandomCount] = useState(2)
+  const [randomRotate, setRandomRotate] = useState(true)
+  const isRandom = !LAYOUT_TEMPLATES.some((t) => sameLayout(t.layout, engine.layout))
+
   return (
-    <div className="absolute top-20 right-3 flex flex-col gap-3 rounded-xl bg-white/95 p-3 shadow-lg backdrop-blur">
+    <div className="absolute top-20 right-3 flex w-40 flex-col gap-3 rounded-xl bg-white/95 p-3 shadow-lg backdrop-blur">
       <div>
         <div className="mb-1.5 text-xs font-medium text-gray-500">配置</div>
         <div className="grid grid-cols-2 gap-1.5">
@@ -71,9 +83,9 @@ export function LayoutPanel({ engine, highlightVariant, onSelectTemplate, onSetH
             <button
               key={t.id}
               title={t.label}
-              onClick={() => onSelectTemplate(t)}
+              onClick={() => onSelectLayout(t.layout)}
               className={`flex h-11 items-center justify-center rounded-lg border ${
-                sameLayout(t.layout, engine.layout)
+                !isRandom && sameLayout(t.layout, engine.layout)
                   ? 'border-sky-400 bg-sky-50'
                   : 'border-gray-200 hover:bg-gray-50'
               }`}
@@ -82,6 +94,46 @@ export function LayoutPanel({ engine, highlightVariant, onSelectTemplate, onSetH
             </button>
           ))}
         </div>
+      </div>
+      <div>
+        <div className="mb-1.5 text-xs font-medium text-gray-500">ランダム配置</div>
+        <div className="flex items-center gap-1.5">
+          {[2, 3, 4].map((n) => (
+            <button
+              key={n}
+              onClick={() => setRandomCount(n)}
+              className={`h-7 w-7 rounded-md border text-xs tabular-nums ${
+                randomCount === n
+                  ? 'border-sky-400 bg-sky-50 text-sky-700'
+                  : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              {n}
+            </button>
+          ))}
+          <span className="text-[10px] text-gray-400">種類</span>
+        </div>
+        <label className="mt-1.5 flex items-center gap-1.5 text-xs text-gray-600">
+          <input
+            type="checkbox"
+            checked={randomRotate}
+            onChange={(e) => setRandomRotate(e.target.checked)}
+            className="accent-sky-600"
+          />
+          回転も混ぜる
+        </label>
+        <button
+          onClick={() => onGenerateRandom(randomCount, randomRotate)}
+          title="ランダムに並べ直す（絵は変わりません）"
+          className={`mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border py-1.5 text-sm ${
+            isRandom
+              ? 'border-sky-400 bg-sky-50 text-sky-700'
+              : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+          }`}
+        >
+          <Dices size={16} />
+          シャッフル
+        </button>
       </div>
       {engine.variantCount > 1 && (
         <div>

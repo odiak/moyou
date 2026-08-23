@@ -4,13 +4,21 @@
 // image still loads as a plain single cell and only the pattern structure
 // is lost.
 
-import { Layout, layoutVariantCount, PatternParams, SINGLE_LAYOUT } from './engine'
+import {
+  Layout,
+  layoutRotation,
+  layoutVariantCount,
+  PatternParams,
+  rotSource,
+  SINGLE_LAYOUT
+} from './engine'
 import { encodePng, readTextChunks } from './png'
 
 export const METADATA_KEYWORD = 'moyou'
 
 export type MoyouMetadata = {
-  version: 2
+  // 2 = variant grid, 3 = adds per-position rotations
+  version: 2 | 3
   // Per-cell size; the image itself is (cols * w) × (rows * h)
   w: number
   h: number
@@ -20,6 +28,7 @@ export type MoyouMetadata = {
   cols: number
   rows: number
   map: number[]
+  rot?: number[]
 }
 
 export type LoadedPattern = {
@@ -41,8 +50,9 @@ export async function encodePatternPng(
   layout: Layout,
   params: PatternParams
 ): Promise<Uint8Array> {
+  const hasRot = layout.rot !== undefined && layout.rot.some((r) => (r & 3) !== 0)
   const meta: MoyouMetadata = {
-    version: 2,
+    version: hasRot ? 3 : 2,
     w: cellWidth,
     h: cellHeight,
     shift: params.shift,
@@ -50,7 +60,8 @@ export async function encodePatternPng(
     flipY: params.flipY,
     cols: layout.cols,
     rows: layout.rows,
-    map: layout.map
+    map: layout.map,
+    ...(hasRot ? { rot: layout.rot!.map((r) => r & 3) } : {})
   }
   return encodePng(superData, layout.cols * cellWidth, layout.rows * cellHeight, {
     [METADATA_KEYWORD]: JSON.stringify(meta)
@@ -71,6 +82,14 @@ function isValidLayout(cols: unknown, rows: unknown, map: unknown): map is numbe
   return map.every((v) => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < 16)
 }
 
+function isValidRot(rot: unknown, length: number): rot is number[] {
+  return (
+    Array.isArray(rot) &&
+    rot.length === length &&
+    rot.every((r) => typeof r === 'number' && Number.isInteger(r) && r >= 0 && r < 4)
+  )
+}
+
 function parseMetadata(text: string | undefined): ParsedMetadata | undefined {
   if (text === undefined) return undefined
   try {
@@ -86,13 +105,10 @@ function parseMetadata(text: string | undefined): ParsedMetadata | undefined {
     if (m.version === 1) {
       return { w: m.w, h: m.h, layout: SINGLE_LAYOUT, params }
     }
-    if (m.version === 2 && isValidLayout(m.cols, m.rows, m.map)) {
-      return {
-        w: m.w,
-        h: m.h,
-        layout: { cols: m.cols as number, rows: m.rows as number, map: m.map },
-        params
-      }
+    if ((m.version === 2 || m.version === 3) && isValidLayout(m.cols, m.rows, m.map)) {
+      const layout: Layout = { cols: m.cols as number, rows: m.rows as number, map: m.map }
+      if (isValidRot(m.rot, layout.map.length)) layout.rot = m.rot
+      return { w: m.w, h: m.h, layout, params }
     }
     return undefined
   } catch {
@@ -141,18 +157,23 @@ export async function decodePatternFile(file: Blob): Promise<LoadedPattern> {
     }
   }
 
-  // Slice the super cell image back into variant buffers. Duplicate grid
-  // positions of the same variant just overwrite each other (they are
-  // identical in files we wrote ourselves).
+  // Slice the super cell image back into variant buffers (undoing each
+  // position's rotation). Duplicate grid positions of the same variant just
+  // overwrite each other (they are identical in files we wrote ourselves).
   const { w, h, layout } = meta
   const data = new Uint8ClampedArray(layoutVariantCount(layout) * w * h * 4)
+  const dataWords = new Uint32Array(data.buffer)
+  const imageWords = new Uint32Array(image.data.buffer, image.data.byteOffset, width * height)
   for (let j = 0; j < layout.map.length; j++) {
     const gx = j % layout.cols
     const gy = (j / layout.cols) | 0
-    const v = layout.map[j]
-    for (let y = 0; y < h; y++) {
-      const src = ((gy * h + y) * width + gx * w) * 4
-      data.set(image.data.subarray(src, src + w * 4), (v * h + y) * w * 4)
+    const base = layout.map[j] * w * h
+    const rot = layoutRotation(layout, j)
+    for (let dy = 0; dy < h; dy++) {
+      const row = (gy * h + dy) * width + gx * w
+      for (let dx = 0; dx < w; dx++) {
+        dataWords[base + rotSource(dx, dy, w, rot)] = imageWords[row + dx]
+      }
     }
   }
   return { cellWidth: w, cellHeight: h, layout, data, params: meta.params }

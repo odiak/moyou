@@ -17,8 +17,9 @@ export type PatternParams = {
 }
 
 // Arrangement of cell variants inside the super cell: map[gy * cols + gx]
-// is the variant index shown at that grid position.
-export type Layout = { cols: number; rows: number; map: number[] }
+// is the variant index shown at that grid position, rot (optional) its
+// clockwise rotation in quarter turns (0-3).
+export type Layout = { cols: number; rows: number; map: number[]; rot?: number[] }
 
 export const SINGLE_LAYOUT: Layout = { cols: 1, rows: 1, map: [0] }
 
@@ -26,8 +27,39 @@ export function layoutVariantCount(layout: Layout): number {
   return Math.max(...layout.map) + 1
 }
 
+export function layoutRotation(layout: Layout, index: number): number {
+  return layout.rot !== undefined ? layout.rot[index] & 3 : 0
+}
+
+function rotKey(layout: Layout): string {
+  return layout.rot !== undefined && layout.rot.some((r) => (r & 3) !== 0)
+    ? layout.rot.map((r) => r & 3).join(',')
+    : ''
+}
+
 export function sameLayout(a: Layout, b: Layout): boolean {
-  return a.cols === b.cols && a.rows === b.rows && a.map.join(',') === b.map.join(',')
+  return (
+    a.cols === b.cols &&
+    a.rows === b.rows &&
+    a.map.join(',') === b.map.join(',') &&
+    rotKey(a) === rotKey(b)
+  )
+}
+
+// Flat pixel index (sy * n + sx) of the source pixel that is shown at
+// (dx, dy) when a square n×n cell is drawn rotated by rot quarter turns
+// clockwise.
+export function rotSource(dx: number, dy: number, n: number, rot: number): number {
+  switch (rot & 3) {
+    case 1:
+      return (n - 1 - dx) * n + dy
+    case 2:
+      return (n - 1 - dy) * n + (n - 1 - dx)
+    case 3:
+      return dx * n + (n - 1 - dy)
+    default:
+      return dy * n + dx
+  }
 }
 
 export type LayoutTemplate = { id: string; label: string; layout: Layout }
@@ -143,9 +175,9 @@ export class PatternEngine {
     return this.data.subarray(variant * size, (variant + 1) * size)
   }
 
-  // World coordinates → flat pixel index (variant * w * h + cy * w + cx).
+  // World coordinates → flat pixel index (variant * w * h + pixel).
   // Torus wrap of the super cell with shift and alternating mirror, then
-  // the layout grid picks the variant.
+  // the layout grid picks the variant and its rotation.
   mapPoint(wx: number, wy: number): number {
     const { width: w, height: h, layout } = this
     const W = layout.cols * w
@@ -160,8 +192,9 @@ export class PatternEngine {
     if (flipY && mod(k, 2) === 1) yy = H - 1 - yy
     const gx = (xx / w) | 0
     const gy = (yy / h) | 0
-    const v = layout.map[gy * layout.cols + gx]
-    return (v * h + (yy - gy * h)) * w + (xx - gx * w)
+    const g = gy * layout.cols + gx
+    const v = layout.map[g]
+    return v * w * h + rotSource(xx - gx * w, yy - gy * h, w, layoutRotation(layout, g))
   }
 
   variantOfIndex(index: number): number {
@@ -256,14 +289,17 @@ export class PatternEngine {
     const { width: w, height: h, layout } = this
     const W = this.superWidth
     const out = new Uint8ClampedArray(W * this.superHeight * 4)
+    const outWords = new Uint32Array(out.buffer)
     for (let j = 0; j < layout.map.length; j++) {
       const gx = j % layout.cols
       const gy = (j / layout.cols) | 0
-      const v = layout.map[j]
-      for (let y = 0; y < h; y++) {
-        const src = (v * h + y) * w * 4
-        const dst = ((gy * h + y) * W + gx * w) * 4
-        out.set(this.data.subarray(src, src + w * 4), dst)
+      const base = layout.map[j] * w * h
+      const rot = layoutRotation(layout, j)
+      for (let dy = 0; dy < h; dy++) {
+        const row = (gy * h + dy) * W + gx * w
+        for (let dx = 0; dx < w; dx++) {
+          outWords[row + dx] = this.words[base + rotSource(dx, dy, w, rot)]
+        }
       }
     }
     return out

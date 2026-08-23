@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { packColor, PatternEngine, TRANSPARENT, unpackColor } from './lib/engine'
+import { layoutRotation, packColor, PatternEngine, TRANSPARENT, unpackColor } from './lib/engine'
 
 export type Tool = 'pen' | 'eraser' | 'fill' | 'eyedropper' | 'pan'
 
@@ -65,10 +65,12 @@ export function PatternCanvas(props: Props) {
     const canvas = canvasRef.current!
     const ctx = canvas.getContext('2d')!
 
-    // The super cell (variant arrangement) rendered as one image
+    // The super cell (variant arrangement) rendered as one image; each
+    // variant gets its own small canvas so it can be drawn rotated
     const superCanvas = document.createElement('canvas')
     const superCtx = superCanvas.getContext('2d')!
     let variantImages: ImageData[] = []
+    let variantCanvases: HTMLCanvasElement[] = []
     let uploadedEngine: PatternEngine | null = null
     let uploadedRevision = -1
 
@@ -86,7 +88,9 @@ export function PatternCanvas(props: Props) {
     const resetView = () => {
       const { engine } = propsRef.current
       const view = viewRef.current
-      const target = Math.min(cssW / (engine.superWidth * 3), cssH / (engine.superHeight * 3))
+      // Fit roughly five cells across (independent of super cell size, so
+      // large random blocks don't start zoomed way out)
+      const target = Math.min(cssW / (engine.width * 5), cssH / (engine.height * 5))
       view.scale = clampScale(Math.min(8, Math.max(0.5, target)))
       view.x = engine.superWidth / 2 - cssW / (2 * view.scale)
       view.y = engine.superHeight / 2 - cssH / (2 * view.scale)
@@ -138,17 +142,38 @@ export function PatternCanvas(props: Props) {
         superCanvas.width = W
         superCanvas.height = H
         variantImages = []
+        variantCanvases = []
         for (let v = 0; v < engine.variantCount; v++) {
           variantImages.push(
             new ImageData(engine.cellData(v) as Uint8ClampedArray<ArrayBuffer>, w, h)
           )
+          const vc = document.createElement('canvas')
+          vc.width = w
+          vc.height = h
+          variantCanvases.push(vc)
         }
         uploadedEngine = engine
         uploadedRevision = -1
       }
       if (uploadedRevision !== engine.revision) {
+        for (let v = 0; v < engine.variantCount; v++) {
+          variantCanvases[v].getContext('2d')!.putImageData(variantImages[v], 0, 0)
+        }
+        superCtx.setTransform(1, 0, 0, 1, 0, 0)
+        superCtx.clearRect(0, 0, W, H)
         for (let j = 0; j < map.length; j++) {
-          superCtx.putImageData(variantImages[map[j]], (j % cols) * w, ((j / cols) | 0) * h)
+          const gx = j % cols
+          const gy = (j / cols) | 0
+          const rot = layoutRotation(engine.layout, j)
+          if (rot === 0) {
+            superCtx.drawImage(variantCanvases[map[j]], gx * w, gy * h)
+          } else {
+            superCtx.save()
+            superCtx.translate(gx * w + w / 2, gy * h + h / 2)
+            superCtx.rotate((rot * Math.PI) / 2)
+            superCtx.drawImage(variantCanvases[map[j]], -w / 2, -h / 2)
+            superCtx.restore()
+          }
         }
         uploadedRevision = engine.revision
       }
